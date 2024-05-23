@@ -1,0 +1,27 @@
+
+    function provideLiquidity(address tokenAddress) internal {
+        Token storage token = tokens[tokenAddress];
+        uint256 amountToken = token.supply.div(2); // Provide half of the total token supply
+        uint256 amountETH = token.ethCollected *95/100;
+        payable(owner()).transfer(token.ethCollected*5/100);
+
+        require(amountToken > 0 && amountETH > 0, "Insufficient liquidity");
+
+        // Approve Uniswap Router to spend tokens
+        require(MyToken(tokenAddress).approve(uniswapRouterAddress, amountToken), "Approval failed");
+
+        // Provide liquidity to Uniswap
+        try 
+        IUniswapV2Router02(uniswapRouterAddress).addLiquidityETH{value: amountETH}(
+            tokenAddress,
+            amountToken,
+            amountToken, // Minimum token amount
+            amountETH, // Minimum ETH amount
+            address(this),
+            block.timestamp
+        )
+        {} catch {}
+        
+
+        emit LiquidityProvided(tokenAddress, amountToken, amountETH);
+    }
