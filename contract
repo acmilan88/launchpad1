@@ -1,0 +1,337 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.25;
+
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
+library Curve {
+    function integrate(uint256 m, uint256 b, uint256 x0, uint256 dx) internal pure returns (uint256) {
+        uint256 x0Squared = x0 * x0;
+        uint256 x1 = x0 + dx;
+        uint256 x1Squared = x1 * x1;
+        uint256 squareDiff = x1Squared - x0Squared;
+
+        uint256 term1 = m * squareDiff / 2;
+        uint256 term2 = b * dx;
+
+        return term1 + term2;
+    }
+
+    function y(uint128 slope, uint128 yIntercept, uint256 x) internal pure returns (uint256) {
+        return slope * x + yIntercept;
+    }
+}
+
+contract MyToken is ERC20, ERC20Burnable, Ownable {
+    constructor(string memory name, string memory symbol, uint _initialSupply) ERC20(name, symbol) Ownable(msg.sender) {
+        _mint(msg.sender, _initialSupply); 
+    }
+
+    function renounceTokenOwnership() public onlyOwner {
+        renounceOwnership();
+    }
+
+    function mint(address _to, uint _amount) public onlyOwner {
+        _mint(_to, _amount);
+    }
+
+    function burn(address _to, uint _amount) public onlyOwner {
+        _burn(_to, _amount);
+    }
+}
+
+contract Launchpad is Ownable, ReentrancyGuard {
+    using SafeMath for uint256;
+
+    uint initialPrice = 0.000000029 ether;
+    mapping(address => uint) public currentPrice;
+    uint PriceEscalation = 0.000000002 ether;
+    uint initialSupply = 0 ether;
+
+    uint256 public feePercent = 12;
+    uint256 public deployerFeePercent = 10;
+
+    struct Token {
+        string name;
+        string symbol;
+        uint256 supply;
+        address owner;
+        bool launched;
+        uint256 marketCap;
+        uint256 ethCollected;
+        uint256 tokenCreated;
+        uint256 tokenLaunched;
+        string[] desc;
+    }
+
+    mapping(address => Token) public tokens;
+    address[] public tokenContracts;
+
+    address public uniswapRouterAddress;
+    mapping(address => uint256) public feesCollected;
+    mapping(address => uint256) public deployerFees;
+
+    event TokenCreated(address indexed tokenAddress, string name, string symbol, uint256 totalSupply, address indexed owner);
+    event TokensWithdrawn(address indexed tokenAddress, address indexed recipient, uint256 amount);
+    event TokensPurchased(address indexed tokenAddress, address indexed buyer, uint256 amount, uint256 ethPaid);
+    event TokensSold(address indexed tokenAddress, address indexed seller, uint256 amount, uint256 ethReceived);
+    event TokenLaunched(address indexed tokenAddress, uint256 marketCap, uint256 liquidity);
+    event LiquidityProvided(address indexed tokenAddress, uint256 amountToken, uint256 amountETH);
+    event TokensReceived(address indexed tokenAddress, address indexed sender, uint256 amount);
+    event LiquidityProvisionFailed(address indexed tokenAddress, string reason);
+    event FeePercentUpdated(uint256 newFeePercent);
+    event DeployerFeePercentUpdated(uint256 newDeployerFeePercent);
+
+    constructor() Ownable(msg.sender) {
+        uniswapRouterAddress = 0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008;
+    }
+
+    receive() external payable {}
+
+
+    function createToken(string memory name, string memory symbol,string[] memory _desc) external {
+        require(bytes(name).length > 0 && bytes(symbol).length > 0, "Name and symbol must not be empty");
+
+        address ownerAddress = msg.sender; // Anyone can create a token
+
+        MyToken newToken = new MyToken(name, symbol,initialSupply);
+        newToken.transferOwnership(address(this)); // Transfer ownership to this contract
+
+        tokens[address(newToken)] = Token({
+            name: name,
+            symbol: symbol,
+            supply: 0,
+            owner: ownerAddress,
+            launched: false,
+            marketCap: 0,
+            ethCollected: 0,
+            tokenCreated: block.timestamp,
+            tokenLaunched: 0,
+            desc: _desc
+        });
+
+        tokenContracts.push(address(newToken)); // Store the address of the newly created token contract
+        currentPrice[address(newToken)] = initialPrice;
+        emit TokenCreated(address(newToken), name, symbol, 0, ownerAddress);
+    }
+
+    function getEthCollected(address tokenAddress) external view returns (uint256) {
+        return tokens[tokenAddress].ethCollected;
+    }
+
+    function getTotalEthCollected() external view returns (uint256) {
+        uint256 totalEthCollected = 0;
+        for (uint256 i = 0; i < tokenContracts.length; i++) {
+            totalEthCollected = totalEthCollected.add(tokens[tokenContracts[i]].ethCollected);
+        }
+        return totalEthCollected;
+    }
+
+    function getTokenContractsCount() external view returns (uint256) {
+        return tokenContracts.length;
+    }
+
+    // Internal function to handle the actual logic of buying tokens
+    function _buyTokens(address tokenAddress, address buyer, uint256 ethAmount) internal {
+    }
+
+    // Internal function to handle the actual logic of selling tokens
+    function _sellTokens(address tokenAddress, address seller, uint256 amount) internal {
+    }
+
+    function buyTokens(address tokenAddress) external payable nonReentrant {
+        _buyTokens(tokenAddress, msg.sender, msg.value);
+    Token storage token = tokens[tokenAddress];
+
+    // Calculate the price for tokens
+    uint256 priceForTokens = calculatePrice(ERC20(tokenAddress).totalSupply());
+    uint tokensToMint = msg.value * (10**18) / priceForTokens;
+    currentPrice[tokenAddress] = priceForTokens;
+
+    // Calculate fees
+    uint256 fee = msg.value.mul(feePercent).div(1000);
+    uint256 feeToDeployer = fee.mul(deployerFeePercent).div(100);
+    uint256 feeToContract = fee.sub(feeToDeployer);
+
+    // Collect fees
+    feesCollected[tokenAddress] = feesCollected[tokenAddress].add(feeToContract);
+    deployerFees[tokenAddress] = deployerFees[tokenAddress].add(feeToDeployer);
+
+    // Transfer fee to the deployer
+    payable(owner()).transfer(feeToDeployer);
+
+    // Mint tokens to the buyer
+    MyToken(tokenAddress).mint(msg.sender, tokensToMint);
+    MyToken(tokenAddress).mint(address(this), tokensToMint);
+
+    // Update ETH collected
+    token.ethCollected = token.ethCollected.add(msg.value);
+
+    // Update token market cap and supply
+    token.marketCap = ERC20(tokenAddress).totalSupply() * currentPrice[tokenAddress] / (10**18);
+    token.supply += tokensToMint * 2;
+
+    // Emit event
+    emit TokensPurchased(tokenAddress, msg.sender, tokensToMint, msg.value);
+
+    // Function to be called after the transaction is completed
+    // Check if total ETH collected exceeds or equals to 4 ETH and token hasn't been launched yet
+    if (token.ethCollected >= 0.01 ether && !token.launched) {
+        autoLaunchToken(tokenAddress);
+    }
+}
+
+
+
+    function calculatePrice(uint _totalS) public view returns (uint) {
+        uint knots = (_totalS - initialSupply) / (2000000 * (10**18));
+        uint escalation = initialPrice + (knots * PriceEscalation);
+        return escalation;
+    }
+
+    function sellTokens(address tokenAddress, uint256 amount) external payable nonReentrant {
+        _sellTokens(tokenAddress, msg.sender, amount);
+        Token storage token = tokens[tokenAddress];
+        require(amount > 0, "Amount must be greater than 0");
+        require(ERC20(tokenAddress).balanceOf(msg.sender) >= amount, "Insufficient balance");
+        require(ERC20(tokenAddress).allowance(msg.sender, address(this)) >= amount, "Allowance not set");
+
+        uint256 priceForTokens = calculatePrice(ERC20(tokenAddress).totalSupply());
+        uint256 ethAmount = priceForTokens * amount / (10**18);
+        require(ethAmount > 0, "Insufficient tokens for sale");
+        currentPrice[tokenAddress] = priceForTokens;
+
+        uint256 fee = ethAmount.mul(feePercent).div(1000);
+        uint256 feeToDeployer = fee.mul(deployerFeePercent).div(100);
+        uint256 feeToContract = fee.sub(feeToDeployer);
+
+        feesCollected[tokenAddress] = feesCollected[tokenAddress].add(feeToContract);
+        deployerFees[tokenAddress] = deployerFees[tokenAddress].add(feeToDeployer);
+
+        MyToken(tokenAddress).burn(msg.sender, amount);
+        payable(owner()).transfer(feeToDeployer);
+        payable(msg.sender).transfer(ethAmount.sub(fee));
+
+        token.ethCollected = token.ethCollected.sub(ethAmount);
+
+        token.marketCap = ERC20(tokenAddress).totalSupply().mul(currentPrice[tokenAddress]).div(10**18);
+        token.supply = token.supply.sub(amount);
+
+        emit TokensSold(tokenAddress, msg.sender, amount, ethAmount);
+    }
+
+    function autoLaunchToken(address tokenAddress) internal onlyOwner {
+        Token storage token = tokens[tokenAddress];
+        require(!token.launched, "Token already launched");
+
+        // Update launched status
+        token.launched = true;
+        token.tokenLaunched = block.timestamp;
+
+        // Emit event
+        emit TokenLaunched(tokenAddress, token.marketCap, token.ethCollected);
+
+        // Provide liquidity to Uniswap
+        provideLiquidity(tokenAddress);
+
+        // Renounce ownership of the token contract
+        MyToken(tokenAddress).renounceTokenOwnership();
+    }
+
+function provideLiquidity(address tokenAddress) internal {
+    Token storage token = tokens[tokenAddress];
+    uint256 contractTokenBalance = ERC20(tokenAddress).balanceOf(address(this));
+    uint256 amountToken = token.supply.div(2); // Provide half of the total token supply
+               //uint256 amountToken = contractTokenBalance.mul(95).div(100); // 95% of the token balance
+
+    // Calculate the amount of ETH after deducting the fee
+    uint256 ethAfterFee = token.ethCollected.mul(9975).div(10000); // 1.25% fee deducted
+
+    // Calculate the amount of ETH reserved for liquidity
+    uint256 liquidityETH = ethAfterFee.mul(5).div(100); // 5% reserved for liquidity
+
+    // Calculate the amount of ETH available for liquidity provision
+    uint256 amountETH = ethAfterFee.sub(liquidityETH); // Remaining ETH after deducting liquidity reserve
+
+    // Ensure contract has enough ETH for liquidity provision
+    require(address(this).balance >= amountETH, "Insufficient ETH balance for liquidity");
+
+    // Transfer liquidity reserve to the owner
+																												 
+    payable(owner()).transfer(liquidityETH);
+
+    require(amountToken > 0 && amountETH > 0, "Insufficient liquidity");
+    require(contractTokenBalance >= amountToken, "Insufficient token balance");
+
+    // Approve Uniswap Router to spend tokens
+    require(MyToken(tokenAddress).approve(uniswapRouterAddress, amountToken), "Approval failed");
+
+    // Try to provide liquidity to Uniswap
+    try IUniswapV2Router02(uniswapRouterAddress).addLiquidityETH{value: amountETH}(
+        tokenAddress,
+        amountToken,
+        0, // Minimum token amount (set to 0 to allow any amount)
+        0, // Minimum ETH amount (set to 0 to allow any amount)
+        address(this), // Liquidity tokens receiver
+        block.timestamp
+    ) returns (uint amountTokenProvided, uint amountETHProvided, uint liquidity) {
+        emit LiquidityProvided(tokenAddress, amountTokenProvided, amountETHProvided);
+    } catch Error(string memory reason) {
+        emit LiquidityProvisionFailed(tokenAddress, reason);
+    } catch (bytes memory lowLevelData) {
+        string memory decodedData = _getRevertMsg(lowLevelData);
+        emit LiquidityProvisionFailed(tokenAddress, decodedData);
+    }
+}
+
+
+    function _getRevertMsg(bytes memory _returnData) internal pure returns (string memory) {
+        if (_returnData.length < 68) return 'Transaction reverted silently';
+
+        assembly {
+            _returnData := add(_returnData, 0x04)
+        }
+        return abi.decode(_returnData, (string));
+    }
+
+    function getTokens() public view returns (Token[] memory) {
+        Token[] memory arr1 = new Token[](tokenContracts.length);
+
+        for (uint i = 0; i < tokenContracts.length; i++) {
+            Token memory tx1 = tokens[tokenContracts[i]];
+            arr1[i] = tx1;
+        }
+        return arr1;
+    }
+
+function withdrawFees(address tokenAddress) external onlyOwner {
+    uint256 amount = feesCollected[tokenAddress];
+    uint256 deployerFee = deployerFees[tokenAddress];
+    require(amount > 0, "No fees to withdraw");
+
+    feesCollected[tokenAddress] = 0;
+    deployerFees[tokenAddress] = 0;
+
+    // Instead of transferring fees separately, accumulate and transfer them in a single transaction
+    uint256 totalAmount = amount + deployerFee;
+    payable(owner()).transfer(totalAmount);
+
+    emit TokensWithdrawn(tokenAddress, owner(), totalAmount);
+}
+
+    function setFeePercent(uint256 newFeePercent) external onlyOwner {
+        require(newFeePercent <= 100, "Fee percent must be less than or equal to 100");
+        feePercent = newFeePercent;
+        emit FeePercentUpdated(newFeePercent);
+    }
+
+    function setDeployerFeePercent(uint256 newDeployerFeePercent) external onlyOwner {
+        require(newDeployerFeePercent <= 20, "Deployer fee percent must be less than or equal to 20");
+        deployerFeePercent = newDeployerFeePercent;
+        emit DeployerFeePercentUpdated(newDeployerFeePercent);
+    }
+}
