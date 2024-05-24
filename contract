@@ -9,6 +9,7 @@ import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 library Curve {
+    using SafeMath for uint256;
     function integrate(uint256 m, uint256 b, uint256 x0, uint256 dx) internal pure returns (uint256) {
         uint256 x0Squared = x0 * x0;
         uint256 x1 = x0 + dx;
@@ -27,6 +28,7 @@ library Curve {
 }
 
 contract MyToken is ERC20, ERC20Burnable, Ownable {
+    using SafeMath for uint256;
     constructor(string memory name, string memory symbol, uint _initialSupply) ERC20(name, symbol) Ownable(msg.sender) {
         _mint(msg.sender, _initialSupply); 
     }
@@ -82,7 +84,6 @@ contract Launchpad is Ownable, ReentrancyGuard {
     event TokenLaunched(address indexed tokenAddress, uint256 marketCap, uint256 liquidity);
     event LiquidityProvided(address indexed tokenAddress, uint256 amountToken, uint256 amountETH);
     event TokensReceived(address indexed tokenAddress, address indexed sender, uint256 amount);
-    event LiquidityProvisionFailed(address indexed tokenAddress, string reason);
     event FeePercentUpdated(uint256 newFeePercent);
     event DeployerFeePercentUpdated(uint256 newDeployerFeePercent);
 
@@ -91,7 +92,6 @@ contract Launchpad is Ownable, ReentrancyGuard {
     }
 
     receive() external payable {}
-
 
     function createToken(string memory name, string memory symbol,string[] memory _desc) external {
         require(bytes(name).length > 0 && bytes(symbol).length > 0, "Name and symbol must not be empty");
@@ -145,6 +145,7 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
     function buyTokens(address tokenAddress) external payable nonReentrant {
         _buyTokens(tokenAddress, msg.sender, msg.value);
+    // Check if trading is paused for this token
     Token storage token = tokens[tokenAddress];
 
     // Calculate the price for tokens
@@ -296,7 +297,7 @@ function provideLiquidity(address tokenAddress) internal {
         return arr1;
     }
 
-function withdrawFees(address tokenAddress) external onlyOwner {
+   function withdrawFees(address tokenAddress) external onlyOwner {
     uint256 amount = feesCollected[tokenAddress];
     uint256 deployerFee = deployerFees[tokenAddress];
     require(amount > 0, "No fees to withdraw");
@@ -309,7 +310,7 @@ function withdrawFees(address tokenAddress) external onlyOwner {
     payable(owner()).transfer(totalAmount);
 
     emit TokensWithdrawn(tokenAddress, owner(), totalAmount);
-}
+   }
 
     function setFeePercent(uint256 newFeePercent) external onlyOwner {
         require(newFeePercent <= 100, "Fee percent must be less than or equal to 100");
@@ -323,3 +324,4 @@ function withdrawFees(address tokenAddress) external onlyOwner {
         emit DeployerFeePercentUpdated(newDeployerFeePercent);
     }
 }
+
