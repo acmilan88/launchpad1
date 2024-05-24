@@ -244,48 +244,36 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
 function provideLiquidity(address tokenAddress) internal {
     Token storage token = tokens[tokenAddress];
-    uint256 contractTokenBalance = ERC20(tokenAddress).balanceOf(address(this));
     uint256 amountToken = token.supply.div(2); // Provide half of the total token supply
-               //uint256 amountToken = contractTokenBalance.mul(95).div(100); // 95% of the token balance
+    uint256 amountETH = token.ethCollected * 95 / 100;
 
-    // Calculate the amount of ETH after deducting the fee
-    uint256 ethAfterFee = token.ethCollected.mul(9975).div(10000); // 1.25% fee deducted
-
-    // Calculate the amount of ETH reserved for liquidity
-    uint256 liquidityETH = ethAfterFee.mul(5).div(100); // 5% reserved for liquidity
-
-    // Calculate the amount of ETH available for liquidity provision
-    uint256 amountETH = ethAfterFee.sub(liquidityETH); // Remaining ETH after deducting liquidity reserve
-
-    // Ensure contract has enough ETH for liquidity provision
-    require(address(this).balance >= amountETH, "Insufficient ETH balance for liquidity");
-
-    // Transfer liquidity reserve to the owner
-																												 
-    payable(owner()).transfer(liquidityETH);
+    // Calculate 2.5% of token supply to burn
+    uint256 burnAmountToken = token.supply * 25 / 1000; // 2.5% expressed as a fraction
+    require(token.supply >= burnAmountToken, "Insufficient token supply for burning");
+    
+    // Burn 2.5% of token supply
+    token.supply -= burnAmountToken;
 
     require(amountToken > 0 && amountETH > 0, "Insufficient liquidity");
-    require(contractTokenBalance >= amountToken, "Insufficient token balance");
 
     // Approve Uniswap Router to spend tokens
     require(MyToken(tokenAddress).approve(uniswapRouterAddress, amountToken), "Approval failed");
 
-    // Try to provide liquidity to Uniswap
-    try IUniswapV2Router02(uniswapRouterAddress).addLiquidityETH{value: amountETH}(
-        tokenAddress,
-        amountToken,
-        0, // Minimum token amount (set to 0 to allow any amount)
-        0, // Minimum ETH amount (set to 0 to allow any amount)
-        address(this), // Liquidity tokens receiver
-        block.timestamp
-    ) returns (uint amountTokenProvided, uint amountETHProvided, uint liquidity) {
-        emit LiquidityProvided(tokenAddress, amountTokenProvided, amountETHProvided);
-    } catch Error(string memory reason) {
-        emit LiquidityProvisionFailed(tokenAddress, reason);
-    } catch (bytes memory lowLevelData) {
-        string memory decodedData = _getRevertMsg(lowLevelData);
-        emit LiquidityProvisionFailed(tokenAddress, decodedData);
-    }
+    // Provide liquidity to Uniswap
+    (bool success, ) = address(uniswapRouterAddress).call{value: amountETH}(
+        abi.encodeWithSignature(
+            "addLiquidityETH(address,uint256,uint256,uint256,address,uint256)",
+            tokenAddress,
+            amountToken,
+            amountToken, // Minimum token amount
+            amountETH, // Minimum ETH amount
+            address(this),
+            block.timestamp
+        )
+    );
+    require(success, "Failed to provide liquidity");
+
+    emit LiquidityProvided(tokenAddress, amountToken, amountETH);
 }
 
 
