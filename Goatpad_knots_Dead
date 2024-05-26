@@ -6,7 +6,10 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 import "@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol";
+import "@uniswap/v2-core/contracts/interfaces/IUniswapV2Pair.sol";
+import "./IUniswapV2Factory.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
 
 library Curve {
     using SafeMath for uint256;
@@ -26,6 +29,7 @@ library Curve {
         return slope * x + yIntercept;
     }
 }
+
 
 contract MyToken is ERC20, ERC20Burnable, Ownable {
     using SafeMath for uint256;
@@ -56,6 +60,8 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
     uint256 public feePercent = 12;
     uint256 public deployerFeePercent = 10;
+
+    IUniswapV2Router02 public uniswapRouter;
 
     struct Token {
         string name;
@@ -90,6 +96,7 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
     constructor() Ownable(msg.sender) {
         uniswapRouterAddress = 0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008;
+        uniswapRouter = IUniswapV2Router02(uniswapRouterAddress);
     }
 
     receive() external payable {}
@@ -179,7 +186,7 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
       // Function to be called after the transaction is completed
       // Check if total ETH collected exceeds or equals to 4 ETH and token hasn't been launched yet
-      if (token.ethCollected >= 5.01 ether && !token.launched) {
+      if (token.ethCollected >= 0.01 ether && !token.launched) {
         autoLaunchToken(tokenAddress);
       }
     }
@@ -253,38 +260,44 @@ contract Launchpad is Ownable, ReentrancyGuard {
     }
 
     function provideLiquidity(address tokenAddress) internal {
-      Token storage token = tokens[tokenAddress];
-      uint256 amountToken = token.supply.div(2); // Provide half of the total token supply
-      uint256 amountETH = token.ethCollected * 95 / 100;
+    Token storage token = tokens[tokenAddress];
+    uint256 amountToken = token.supply.div(2); // Provide half of the total token supply
+    uint256 amountETH = token.ethCollected * 95 / 100;
 
-      // Calculate 2.5% of token supply to burn
-      uint256 burnAmountToken = token.supply * 25 / 1000; // 2.5% expressed as a fraction
-      require(token.supply >= burnAmountToken, "Insufficient token supply for burning");
+    // Calculate 2.5% of token supply to burn
+    uint256 burnAmountToken = token.supply * 25 / 1000; // 2.5% expressed as a fraction
+    require(token.supply >= burnAmountToken, "Insufficient token supply for burning");
     
-      // Burn 2.5% of token supply
-      token.supply -= burnAmountToken;
+    // Burn 2.5% of token supply
+    token.supply -= burnAmountToken;
 
-      require(amountToken > 0 && amountETH > 0, "Insufficient liquidity");
+    require(amountToken > 0 && amountETH > 0, "Insufficient liquidity");
 
-      // Approve Uniswap Router to spend tokens
-      require(MyToken(tokenAddress).approve(uniswapRouterAddress, amountToken), "Approval failed");
+    // Approve Uniswap Router to spend tokens
+    require(MyToken(tokenAddress).approve(uniswapRouterAddress, amountToken), "Approval failed");
 
-      // Provide liquidity to Uniswap
-      (bool success, ) = address(uniswapRouterAddress).call{value: amountETH}(
-        abi.encodeWithSignature(
-            "addLiquidityETH(address,uint256,uint256,uint256,address,uint256)",
-            tokenAddress,
-            amountToken,
-            amountToken, // Minimum token amount
-            amountETH, // Minimum ETH amount
-            address(this),
-            block.timestamp
-        )
-      );
-      require(success, "Failed to provide liquidity");
+    // Provide liquidity to Uniswap and receive LP tokens
+    (uint256 amountTokenProvided, uint256 amountETHProvided, uint256 liquidity) = uniswapRouter.addLiquidityETH{value: amountETH}(
+        tokenAddress,
+        amountToken,
+        0, // Accept any amount of tokens
+        0, // Accept any amount of ETH
+        address(this),
+        block.timestamp
+    );
 
-      emit LiquidityProvided(tokenAddress, amountToken, amountETH);
-   }
+    require(liquidity > 0, "Failed to provide liquidity");
+
+    // Get the address of the Uniswap pair
+    address pair = IUniswapV2Factory(uniswapRouter.factory()).getPair(tokenAddress, uniswapRouter.WETH());
+    require(pair != address(0), "Failed to get pair address");
+
+    // Burn the LP tokens by sending them to the burn address
+    IUniswapV2Pair(pair).transfer(0x000000000000000000000000000000000000dEaD, liquidity);
+
+    emit LiquidityProvided(tokenAddress, amountTokenProvided, amountETHProvided);
+}
+
 
 
     function _getRevertMsg(bytes memory _returnData) internal pure returns (string memory) {
