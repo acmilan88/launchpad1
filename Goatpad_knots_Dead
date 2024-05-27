@@ -145,50 +145,47 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
     // Function to buy tokens with Ether
     function buyTokens(address tokenAddress) external payable nonReentrant {
-    _buyTokens(tokenAddress);
+        _buyTokens(tokenAddress);
     }
 
     function _buyTokens(address tokenAddress) private {
-    Token storage token = tokens[tokenAddress];
+        Token storage token = tokens[tokenAddress];
 
-    // Convert Ether to wei automatically
-    uint256 priceForTokens = calculatePrice(ERC20(tokenAddress).totalSupply()
-    //+msg.value/currentPrice[tokenAddress]* 2 * (10 **18)
-    );
-    uint tokensToMint = msg.value  * (10**18) / priceForTokens ;
-    currentPrice[tokenAddress] = priceForTokens;
+        uint256 fee = msg.value.mul(feePercent).div(10000);
+        uint256 feeToDeployer = fee.mul(deployerFeePercent).div(100);
+        uint256 feeToContract = fee.sub(feeToDeployer);
 
-    // Calculate fees
-    uint256 fee = msg.value.mul(feePercent).div(1000);
-    uint256 feeToDeployer = fee.mul(deployerFeePercent).div(100);
-    uint256 feeToContract = fee.sub(feeToDeployer);
+        // Amount after fee deduction
+        uint256 amountAfterFee = msg.value.sub(fee);
 
-    // Collect fees
-    feesCollected[tokenAddress] = feesCollected[tokenAddress].add(feeToContract);
-    deployerFees[tokenAddress] = deployerFees[tokenAddress].add(feeToDeployer);
-																				 
+        // Calculate token price and number of tokens to mint
+        uint256 priceForTokens = calculatePrice(IERC20(tokenAddress).totalSupply());
+        uint256 tokensToMint = amountAfterFee.mul(10**18).div(priceForTokens);
 
+        currentPrice[tokenAddress] = priceForTokens;
 
-    // Transfer fee to the deployer
-    payable (owner()).transfer(feeToDeployer);
+        // Collect fees
+        feesCollected[tokenAddress] = feesCollected[tokenAddress].add(feeToContract);
+        deployerFees[tokenAddress] = deployerFees[tokenAddress].add(feeToDeployer);
 
-    // Transfer tokens to the buyer
+        // Transfer fee to the deployer
+        payable(owner()).transfer(feeToDeployer);
 
-    MyToken(tokenAddress).mint(msg.sender, tokensToMint );
-    MyToken(tokenAddress).mint(address(this), tokensToMint );
-    // Update ethCollected
-    token.ethCollected += msg.value;
+        // Transfer tokens to the buyer and the contract
+        MyToken(tokenAddress).mint(msg.sender, tokensToMint);
+        MyToken(tokenAddress).mint(address(this), tokensToMint);
 
-    token.marketCap = ERC20(tokenAddress).totalSupply() * currentPrice[tokenAddress] / (10**18);
-    token.supply +=tokensToMint*2;
+        // Update ethCollected and supply
+        token.ethCollected = token.ethCollected.add(msg.value);
+        token.supply = token.supply.add(tokensToMint.mul(2));
+        token.marketCap = IERC20(tokenAddress).totalSupply().mul(currentPrice[tokenAddress]).div(10**18);
 
-    emit TokensPurchased(tokenAddress, msg.sender, tokensToMint, msg.value);
+        emit TokensPurchased(tokenAddress, msg.sender, tokensToMint, msg.value);
 
-      // Function to be called after the transaction is completed
-      // Check if total ETH collected exceeds or equals to 4 ETH and token hasn't been launched yet
-      if (token.ethCollected >= 0.01 ether && !token.launched) {
-        autoLaunchToken(tokenAddress);
-      }
+        // Auto-launch the token if criteria met
+        if (token.ethCollected >= 0.01 ether && !token.launched) {
+            autoLaunchToken(tokenAddress);
+        }
     }
 
 
@@ -201,44 +198,58 @@ contract Launchpad is Ownable, ReentrancyGuard {
 
 
 
-    function sellTokens(address tokenAddress, uint256 amount) external payable nonReentrant {
-      _sellTokens(tokenAddress, amount);
+uint256 constant GAS_RESERVE_AMOUNT = 0.00005 ether; // Gas reserve amount
+uint256 constant MAX_RESERVE_SALES = 5; // Maximum number of sells to reserve gas for
+
+mapping(address => uint256) public sellCount; // Track the number of sells for each token
+
+function sellTokens(address tokenAddress, uint256 amount) external payable nonReentrant {
+    Token storage token = tokens[tokenAddress]; // Get token information
+    require(amount > 0, "Amount must be greater than 0"); // Ensure amount is valid
+    require(IERC20(tokenAddress).balanceOf(msg.sender) >= amount, "Insufficient token balance"); // Check sender's token balance
+    require(IERC20(tokenAddress).allowance(msg.sender, address(this)) >= amount, "Allowance not set"); // Check allowance
+
+    // Calculate Ether received from the transaction based on the current price of the token
+    uint256 ethReceived = amount * currentPrice[tokenAddress] / (10**18);
+
+    // Check if this is one of the first 5 sells and deduct gas reserve if needed
+    if (sellCount[tokenAddress] < MAX_RESERVE_SALES) {
+        // Ensure that the Ether received is greater than or equal to the gas reserve amount
+        require(ethReceived >= GAS_RESERVE_AMOUNT, "Insufficient funds for gas reserve");
+
+        // Deduct gas reserve from the Ether received
+        ethReceived -= GAS_RESERVE_AMOUNT;
+
+        // Increment sell count
+        sellCount[tokenAddress]++;
     }
 
-    function _sellTokens(address tokenAddress, uint256 amount) private {    Token storage token = tokens[tokenAddress];
-      require(amount > 0, "Amount must be greater than 0");
-      require(ERC20(tokenAddress).balanceOf(msg.sender) >= amount, "Insufficient balance");
+    // Calculate fees
+    uint256 fee = ethReceived.mul(feePercent).div(1000);
+    uint256 feeToDeployer = fee.mul(deployerFeePercent).div(100);
+    uint256 feeToContract = fee.sub(feeToDeployer);
 
-      // Ensure that the caller has approved the Launchpad contract to spend tokens on their behalf
-      require(ERC20(tokenAddress).allowance(msg.sender, address(this)) >= amount, "Allowance not set");
+    // Collect fees
+    feesCollected[tokenAddress] = feesCollected[tokenAddress].add(feeToContract);
+    deployerFees[tokenAddress] = deployerFees[tokenAddress].add(feeToDeployer);
 
-        uint256 priceForTokens = calculatePrice(ERC20(tokenAddress).totalSupply());
-        uint256 ethAmount = priceForTokens * amount / (10**18);
-        require(ethAmount > 0, "Insufficient tokens for sale");
-        currentPrice[tokenAddress] = priceForTokens;
+    // Transfer tokens from seller to contract
+    IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
 
-        uint256 fee = ethAmount.mul(feePercent).div(1000);
-        uint256 feeToDeployer = fee.mul(deployerFeePercent).div(100);
-        uint256 feeToContract = fee.sub(feeToDeployer);
+    // Transfer Ether to seller (excluding gas reserve and fees)
+    payable(msg.sender).transfer(ethReceived - fee);
 
-											 
-																							
-        feesCollected[tokenAddress] = feesCollected[tokenAddress].add(feeToContract);
-        deployerFees[tokenAddress] = deployerFees[tokenAddress].add(feeToDeployer);
+    // Transfer gas reserve to contract
+    token.ethCollected += GAS_RESERVE_AMOUNT;
 
-							  
-        MyToken(tokenAddress).burn(msg.sender, amount);
-        payable(owner()).transfer(feeToDeployer);
-        payable(msg.sender).transfer(ethAmount.sub(fee));
+    // Update token supply and market cap
+    token.supply = token.supply.sub(amount);
+    token.marketCap = IERC20(tokenAddress).totalSupply().mul(currentPrice[tokenAddress]).div(10**18);
 
-        token.ethCollected = token.ethCollected.sub(ethAmount);
-													 
+    // Emit event for token sale
+    emit TokensSold(tokenAddress, msg.sender, amount, ethReceived);
+}
 
-        token.marketCap = ERC20(tokenAddress).totalSupply().mul(currentPrice[tokenAddress]).div(10**18);
-        token.supply = token.supply.sub(amount);
-
-        emit TokensSold(tokenAddress, msg.sender, amount, ethAmount);
-    }
 
 
     function autoLaunchToken(address tokenAddress) internal onlyOwner {
